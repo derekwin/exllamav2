@@ -7,6 +7,7 @@ from torch import load as load_file
 import torch
 import math
 from exllamav2.compat import safe_move_tensor
+from exllamav2.compat import move_tensor_preferring_uhm, init_uhm_runtime
 
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
@@ -57,6 +58,8 @@ class ExLlamaV2Lora:
         self.embed_tokens = None
         self.lm_head = None
 
+        init_uhm_runtime(gpu_id=0, rank=0, world_size=1)
+
         # Compatibility check
 
         assert not self.model.config.arch.lm.residual_stream_fp32, \
@@ -95,7 +98,8 @@ class ExLlamaV2Lora:
                 elif tensor.dtype == torch.float32:
                     tensor = tensor.to(torch.float16)
                 target_module = self.model.modules_dict["lm_head"]
-                tensor = safe_move_tensor(tensor, target_module.device())
+                # tensor = safe_move_tensor(tensor, target_module.device())
+                tensor = move_tensor_preferring_uhm(tensor, target_module.device())
                 self.lm_head = torch.nn.Linear(target_module.in_features, tensor.shape[0], bias = False, device = "meta")
                 self.lm_head.weight = torch.nn.Parameter(tensor, requires_grad=False)
                 continue
@@ -105,7 +109,8 @@ class ExLlamaV2Lora:
                 elif tensor.dtype == torch.float32:
                     tensor = tensor.to(torch.float16)
                 target_module = self.model.modules_dict["model.embed_tokens"]
-                tensor = safe_move_tensor(tensor, target_module.device())
+                # tensor = safe_move_tensor(tensor, target_module.device())
+                tensor = move_tensor_preferring_uhm(tensor, target_module.device())
                 self.embed_tokens = torch.nn.Embedding(tensor.shape[0], self.config.hidden_size, self.config.pad_token_id, device = "meta")
                 weight = torch.nn.Parameter(tensor, requires_grad=False)
                 if self.model.config.scale_emb != 1:
@@ -182,7 +187,8 @@ class ExLlamaV2Lora:
 
             # Move to target device
 
-            tensor = safe_move_tensor(tensor, target_module.device())
+            # tensor = safe_move_tensor(tensor, target_module.device())
+            tensor = move_tensor_preferring_uhm(tensor, target_module.device())
             if lora_half == "lora_A": target_module.lora_a_tensors[self] = tensor
             if lora_half == "lora_B": target_module.lora_b_tensors[self] = tensor
 
