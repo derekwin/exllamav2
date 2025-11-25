@@ -58,8 +58,6 @@ class ExLlamaV2Lora:
         self.embed_tokens = None
         self.lm_head = None
 
-        init_uhm_runtime(gpu_id=0, rank=0, world_size=1)
-
         # Compatibility check
 
         assert not self.model.config.arch.lm.residual_stream_fp32, \
@@ -192,8 +190,14 @@ class ExLlamaV2Lora:
             if lora_half == "lora_A": target_module.lora_a_tensors[self] = tensor
             if lora_half == "lora_B": target_module.lora_b_tensors[self] = tensor
 
+            # try:
+            #     import uhm_tensor as ut
+            #     ut.pin(tensor)
+            #     # ut.ensure_local(tensor)
+            # except ImportError:
+            #     raise ImportError("uhm_tensor module not found. Please ensure it is installed.")
+            
             # Store adapter tensor
-
             self.tensors[target_key] = tensor
             self.target_modules[target_key] = target_module
 

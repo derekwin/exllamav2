@@ -522,20 +522,53 @@ class ExLlamaV2DynamicGenerator:
     def set_loras(self, loras: list[ExLlamaV2Lora] | None):
         """
         Enable LoRAs. Queue must be empty when this is called.
-
-        :param loras:
-            List of LoRAs to enable, or None to disable all.
+        Only pin newly-activated LoRA tensors.
+        Only unpin LoRA tensors that are no longer active.
         """
+        try:
+            import uhm_tensor as ut
+        except ImportError:
+            raise ImportError("uhm_tensor module not found. Please ensure it is installed.")
 
         assert not self.num_remaining_jobs(), \
             "LoRAs cannot be updated while there are jobs in the generator queue."
 
+        # Step 1. Normalize input
         if loras is None:
-            self.current_loras = []
+            new_loras = set()
         elif isinstance(loras, list):
-            self.current_loras = loras
+            new_loras = set(loras)
         else:
-            self.current_loras = [loras]
+            new_loras = {loras}
+
+        # Step 2. Get old LoRAs
+        if self.current_loras == None:
+            self.current_loras = []
+        old_loras = set(getattr(self, "current_loras", []))
+
+        # Step 3. Compute exact diff
+        to_unpin = old_loras - new_loras
+        to_pin   = new_loras - old_loras
+
+        # Step 4. Unpin only LoRAs that are truly removed
+        for old_lora in to_unpin:
+            for t in old_lora.tensors.values():
+                try:
+                    ut.unpin(t)
+                except Exception:
+                    pass
+
+        # Step 5. Pin only newly added LoRAs
+        for new_lora in to_pin:
+            for t in new_lora.tensors.values():
+                try:
+                    ut.pin(t)            # mark as needed
+                    ut.ensure_local(t)   # fetch if remotely evicted
+                except Exception:
+                    pass
+
+        # Step 6. Save
+        self.current_loras = list(new_loras)
 
 
     def generate(

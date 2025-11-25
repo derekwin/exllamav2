@@ -3,7 +3,7 @@ import torch
 import itertools
 from exllamav2.device import get_device_stream
 
-_GLOBAL_UT = None
+_GLOBAL_UHM_INITIALIZED = False
 
 def init_uhm_runtime(
     gpu_id: int = 0,
@@ -14,23 +14,10 @@ def init_uhm_runtime(
     cache_type: str = "LRU",
     mem_type: str = "NVIDIA_GPU"
 ):
-    """
-    初始化全局 UHM runtime。
-    若已存在 _GLOBAL_UT，则直接跳过。
 
-    参数:
-        gpu_id        - 当前 GPU ID
-        rank          - 当前 rank（默认等于 gpu_id）
-        world_size    - 总进程数
-        cache_capacity- 缓存容量
-        prefetch_count- 预取数量
-        cache_type    - 缓存策略 ("LRU" 或 "MARKOV")
-        mem_type      - 内存类型 ("NVIDIA_GPU" 或 "CPU")
-    """
-    global _GLOBAL_UT
-
-    if _GLOBAL_UT is not None:
-        return _GLOBAL_UT
+    global _GLOBAL_UHM_INITIALIZED
+    if _GLOBAL_UHM_INITIALIZED:
+        return
 
     try:
         import uhm_tensor as ut
@@ -46,57 +33,26 @@ def init_uhm_runtime(
     cfg.rank = gpu_id if rank is None else rank
     cfg.world_size = world_size
 
-    _GLOBAL_UT = ut.create_runtime(cfg)
-    print(f"[UHM] Global runtime initialized (GPU {cfg.gpu_id}, rank={cfg.rank}/{cfg.world_size})")
-    return _GLOBAL_UT
+    ut.init(cfg, connect_to=0)
+
+    print(f"[UHM] Global Runtime initialized (GPU {cfg.gpu_id}, rank={cfg.rank}/{cfg.world_size})")
+
+    _GLOBAL_UHM_INITIALIZED = True
 
 
-def _normalize_device(dev) -> str:
-    # 统一成字符串：'cuda' / 'cpu' / 'runtime'
-    if isinstance(dev, torch.device):
-        return dev.type
-    elif isinstance(dev, str):
-        return dev
-    else:
-        raise ValueError(f"Unsupported device spec: {dev}")
-
-
-def uhm_allocate_tensor_like(tensor: torch.Tensor, device: str) -> torch.Tensor:
-    """使用 uhm_tensor 分配一个与 tensor 形状相同的新张量，并复制数据
-       device: str : "cuda"|"cpu"|"runtime"
-    """
+def uhm_allocate_tensor_like(tensor: torch.Tensor):
     try:
         import uhm_tensor as ut
     except ImportError:
         raise ImportError("uhm_tensor module not found. Please ensure it is installed.")
-    
+
     shape = list(tensor.shape)
 
-    dtype_map = {
-        torch.float16: ut.ScalarType.F16,
-        torch.bfloat16: ut.ScalarType.BF16,
-        torch.float32: ut.ScalarType.F32,
-        torch.int8: ut.ScalarType.INT8,
-    }
-
-    dtype_enum = dtype_map.get(tensor.dtype)
-    if dtype_enum is None:
-        raise ValueError(f"Unsupported dtype {tensor.dtype}")
-
-    if device == "cuda":
-        new_tensor = ut.allocate_gpu_tensor(shape, dtype_enum)
-    elif device == "cpu":
-        new_tensor = ut.allocate_cpu_tensor(shape, dtype_enum)
-    elif device == "runtime":
-        if _GLOBAL_UT:
-            new_tensor = ut.allocate_runtime_tensor(_GLOBAL_UT, shape, dtype_enum)
-        else:
-            raise ValueError(f"Unsupported device type: {device}, invalid runtime")
-    else:
-        raise ValueError(f"Unsupported device type: {device}")
-
-    new_tensor.copy_(tensor, non_blocking=True)
-    return new_tensor
+    if not _GLOBAL_UHM_INITIALIZED:
+        raise RuntimeError("UHM runtime not initialized. Call init_uhm_runtime(...) first.")
+    uhmt = ut.allocate(shape, tensor.dtype)
+    uhmt.copy_(tensor, non_blocking=True)
+    return uhmt
 
 
 # Emulate pairwise on Python <3.10
@@ -239,25 +195,10 @@ def move_tensor_preferring_uhm(
     tensor: torch.Tensor,
     device: torch.device | str | int
 ) -> torch.Tensor:
-    """
-    优先使用 UHM runtime 的分配 + copy_ 实现张量迁移；
-    若 _GLOBAL_UT 不存在，则退回 safe_move_tensor。
-    """
     dev = torch.device(device)
-
-    # 如果目标设备一致，直接返回
     if tensor.device == dev:
         return tensor
-
-    # # 如果存在 UHM runtime，优先使用
-    if _GLOBAL_UT is not None:
-        if dev.type == "cpu":
-            return uhm_allocate_tensor_like(tensor, "cpu")
-        elif dev.type == "cuda":
-            # 单机场景可直接使用 runtime 分配
-            return uhm_allocate_tensor_like(tensor, "runtime")
-        else:
-            return safe_move_tensor(tensor, dev)
-
-    # 否则退回原有逻辑
+    
+    if _GLOBAL_UHM_INITIALIZED:
+        return uhm_allocate_tensor_like(tensor) 
     return safe_move_tensor(tensor, dev)
